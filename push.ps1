@@ -1,5 +1,5 @@
 
-et-StrictMode -Version Latest
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if ($PSScriptRoot) { Set-Location $PSScriptRoot } else { Set-Location (Split-Path -Parent $MyInvocation.MyCommand.Path) }
