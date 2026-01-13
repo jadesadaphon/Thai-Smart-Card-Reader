@@ -221,12 +221,11 @@ class IDCardReader:
         full_name_en_raw = read_field('name_en').replace('#', ' ').strip()
 
         def parse_thai_name(full):
-            # Split by spaces collapsing duplicates
             parts = [p for p in full.split(' ') if p]
             title = ''
             first = ''
             last = ''
-            thai_titles = {'นาย','นาง','นางสาว','เด็กชาย','เด็กหญิง'}
+            thai_titles = {'จ.ต.','จ.ต.','จ.ท.','จ.ท.','จ.ส.ต.','จ.ส.ต.','จ.ส.ท.','จ.ส.อ.','จ.อ.','จ.อ.','ด.ต.','น.ต.','น.ต. ...ร.น.','น.ท.','น.ท. ...ร.น.','น.อ.','น.อ. ...ร.น.','พ.จ.ต.','พ.จ.ท.','พ.จ.อ.','พ.ต.','พ.ต.ต.','พ.ต.ท.','พ.ต.อ.','พ.ท.','พ.อ.','พ.อ.ต.','พ.อ.ท.','พ.อ.อ.','พล.ต.','พล.ต.ต.','พล.ต.ท.','พล.ต.อ.','พล.ท.','พล.ร.ต.','พล.ร.ท.','พล.ร.อ.','พล.อ.','พล.อ.ต.','พล.อ.ท.','พล.อ.อ.','พลฯ','พลฯ','พลฯ','ม.ร.ว.','ม.ล.','ร.ต.','ร.ต.','ร.ต. ...ร.น.','ร.ต.ต.','ร.ต.ท.','ร.ต.อ.','ร.ท.','ร.ท.','ร.ท. ...ร.น.','ร.อ.','ร.อ.','ร.อ. ...ร.น.','ส.ต.','ส.ต.ต.','ส.ต.ท.','ส.ต.อ.','ส.ท.','ส.อ.','นาย','นาง','นางสาว','น.ส.','เด็กชาย','ด.ช.','เด็กหญิง','ด.ญ.'}
             if parts:
                 if parts[0] in thai_titles:
                     title = parts[0]
@@ -516,13 +515,22 @@ class IDCardReader:
                     time.sleep(2)
                     continue
 
-            # 2.1 Loop รอการเสียบบัตร (ไม่ส่ง socket ระหว่างรอ)
+            # 2.1 Loop รอการเสียบบัตร (จะส่ง event เมื่อเสียบบัตร)
             while True:
                 cardtype = AnyCardType()
                 cardrequest = CardRequest(timeout=1, cardType=cardtype)
                 try:
                     cardservice = cardrequest.waitforcard()
-                    # 2.2 เจอบัตร -> อ่าน ส่งข้อมูล แล้วไปขั้นตอน 3
+                    # 2.2 เจอบัตร -> แจ้งเหตุการณ์เสียบบัตร, อ่าน ส่งข้อมูล แล้วไปขั้นตอน 3
+                    try:
+                        loop.call_soon_threadsafe(queue.put_nowait, {
+                            'type': 'card_inserted',
+                            'version': MESSAGE_VERSION,
+                            'reader_name': reader_name,
+                            'timestamp': time.time()
+                        })
+                    except Exception:
+                        pass
                     try:
                         card_data = self.read_card_data_with_retry(attempts=3, delay=0.4, cardservice=cardservice)
                         loop.call_soon_threadsafe(queue.put_nowait, {
@@ -558,19 +566,64 @@ class IDCardReader:
                         except Exception:
                             pass
 
-                    # 3 Loop เพื่อรอการถอดบัตร (ไม่ส่ง socket ขณะรอ)
+                    # 3 Loop เพื่อรอการถอดบัตร (ตรวจด้วยการลองเชื่อมต่อเครื่องอ่านแบบเบา ๆ)
                     while True:
-                        cardtype2 = AnyCardType()
-                        cardrequest2 = CardRequest(timeout=1, cardType=cardtype2)
                         try:
-                            cardrequest2.waitforcard()
-                            time.sleep(0.5)
-                            continue  # ยังเสียบอยู่
+                            rlist2 = readers()
+                            if not rlist2:
+                                # เครื่องอ่านหายไป ถือว่าเหมือนถอดบัตร
+                                raise NoCardException("reader not found")
+                            reader2 = rlist2[0]
+                            conn = reader2.createConnection()
+                            try:
+                                # พยายามเชื่อมต่อ หากไม่มีบัตรจะ error (เช่น SCARD_E_NO_SMARTCARD)
+                                conn.connect(protocol=SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1, mode=SCARD_SHARE_SHARED)
+                                # เชื่อมต่อได้ แปลว่ายังมีบัตรอยู่
+                                # ปล่อยให้พักเล็กน้อยแล้วตรวจใหม่
+                                try:
+                                    atr_probe = conn.getATR()
+                                    if self.debug:
+                                        print(f"[DEBUG] Probe ATR len={len(atr_probe)}")
+                                except Exception:
+                                    pass
+                                try:
+                                    conn.disconnect()
+                                except Exception:
+                                    pass
+                                time.sleep(0.5)
+                                continue
+                            except Exception as e_probe:
+                                # เชื่อมต่อไม่ได้ => ไม่มีบัตร
+                                if self.debug:
+                                    print(f"[DEBUG] Removal detected by probe: {e_probe}")
+                                try:
+                                    loop.call_soon_threadsafe(queue.put_nowait, {
+                                        'type': 'card_removed',
+                                        'version': MESSAGE_VERSION,
+                                        'reader_name': reader_name,
+                                        'timestamp': time.time()
+                                    })
+                                except Exception:
+                                    pass
+                                break
                         except NoCardException:
-                            # 3.1 ถอดบัตร -> กลับไป 2.1
+                            # ไม่พบเครื่องอ่านหรือไม่มีบัตร
+                            try:
+                                loop.call_soon_threadsafe(queue.put_nowait, {
+                                    'type': 'card_removed',
+                                    'version': MESSAGE_VERSION,
+                                    'reader_name': reader_name,
+                                    'timestamp': time.time()
+                                })
+                            except Exception:
+                                pass
                             break
-                        except Exception:
-                            break
+                        except Exception as e_unknown:
+                            # ข้อผิดพลาดอื่น ๆ ให้พักแล้วตรวจใหม่เล็กน้อย
+                            if self.debug:
+                                print(f"[DEBUG] Removal loop error: {e_unknown}")
+                            time.sleep(0.5)
+                            continue
                     # กลับไปเริ่มรอเสียบบัตรใหม่
                     continue
                 except NoCardException:

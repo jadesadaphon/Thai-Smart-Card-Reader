@@ -1,3 +1,137 @@
+# Thai Smart Card Reader
+
+ระบบอ่านข้อมูลบัตรประชาชนไทย พร้อมส่งเหตุการณ์ผ่าน WebSocket ให้แอปพลิเคชันภายนอกรับฟังได้แบบเรียลไทม์
+
+## คุณสมบัติ
+- อ่านข้อมูลบัตร (เลขบัตร ชื่อ-นามสกุล วันเกิด เพศ ที่อยู่ หน่วยงานออกบัตร วันออก/วันหมดอายุ และรูปถ่ายในบางรุ่น)
+- ตรวจจับการ "เสียบบัตร" และ "ถอดบัตร" ด้วยเหตุการณ์เฉพาะ
+- ให้บริการ WebSocket บน `ws://0.0.0.0:8765` โดยค่าเริ่มต้น
+- ทำงานเป็น Tray App บน Windows
+
+## การติดตั้ง
+```
+pip install -r requirements.txt
+```
+
+แนะนำให้ติดตั้งไดรเวอร์เครื่องอ่านบัตรและเปิดบริการ Smart Card (`SCardSvr`) ให้พร้อมใช้งานบน Windows
+
+## การใช้งาน
+รันโปรแกรมหลัก:
+```
+python ThaiSmartCardReader.py
+```
+
+เมื่อทำงานแล้วจะมี Tray Icon และ WebSocket Server พร้อมเชื่อมต่อที่ `ws://localhost:8765`
+
+### รูปแบบข้อความ (Events) ที่ส่งผ่าน WebSocket
+ทุกข้อความเป็น JSON และมีฟิลด์ `version` ระบุเวอร์ชันโปรโตคอล (`"1.0"`). ตัวอย่างเหตุการณ์หลัก:
+
+- `reader_status`: สถานะเครื่องอ่านบัตร
+  - ตัวอย่าง (พบเครื่องอ่าน):
+    ```json
+    {
+      "type": "reader_status",
+      "version": "1.0",
+      "status": "found",
+      "reader_name": "ACS ACR122U PICC Reader",
+      "timestamp": 1733550000.123
+    }
+    ```
+  - ตัวอย่าง (ไม่พบเครื่องอ่าน):
+    ```json
+    {
+      "type": "reader_status",
+      "version": "1.0",
+      "status": "not_found",
+      "timestamp": 1733550002.456
+    }
+    ```
+
+- `card_inserted`: ตรวจพบการเสียบบัตร
+  ```json
+  {
+    "type": "card_inserted",
+    "version": "1.0",
+    "reader_name": "ACS ACR122U PICC Reader",
+    "timestamp": 1733550010.789
+  }
+  ```
+
+- `card_data`: ข้อมูลจากบัตรหลังเสียบและอ่านสำเร็จ
+  - โครงสร้าง `data` มีฟิลด์สำคัญ เช่น `cid`, `full_name_th`, `full_name_en`, `birth_th`, `gender_th`, `address`, `issuer`, `issue_date_th`, `expire_date_th`, และ `photo` (Base64 ถ้ามี)
+  - ตัวอย่าง (ย่อ):
+    ```json
+    {
+      "type": "card_data",
+      "version": "1.0",
+      "reader_name": "ACS ACR122U PICC Reader",
+      "timestamp": 1733550011.001,
+      "data": {
+        "cid": "1234567890123",
+        "full_name_th": "นาย สมชาย ใจดี",
+        "full_name_en": "Mr. Somchai Jaidee",
+        "birth_th": "1 มกราคม 2568",
+        "gender_th": "ชาย",
+        "address": "123 หมู่ที่ 2 ตำบลบางรัก อำเภอบางรัก จังหวัดกรุงเทพ",
+        "issuer": "กรมการปกครอง",
+        "issue_date_th": "1 มกราคม 2565",
+        "expire_date_th": "1 มกราคม 2575",
+        "photo": "...base64..."
+      }
+    }
+    ```
+
+- `card_removed`: ตรวจพบการถอดบัตร
+  ```json
+  {
+    "type": "card_removed",
+    "version": "1.0",
+    "reader_name": "ACS ACR122U PICC Reader",
+    "timestamp": 1733550020.234
+  }
+  ```
+
+- `error`: อ่านบัตรไม่สำเร็จ
+  ```json
+  {
+    "type": "error",
+    "version": "1.0",
+    "reader_name": "ACS ACR122U PICC Reader",
+    "timestamp": 1733550011.500,
+    "message": "อ่านบัตรไม่สำเร็จ: ...",
+    "error_code": "SCARD_COMM_ERROR",
+    "retry_attempts": 3
+  }
+  ```
+
+### ตัวอย่าง Client แบบง่าย (Python)
+```python
+import asyncio
+import websockets
+
+async def listen():
+  async with websockets.connect("ws://localhost:8765") as ws:
+    while True:
+      msg = await ws.recv()
+      print(msg)
+
+asyncio.run(listen())
+```
+
+## การตั้งค่าเพิ่มเติมผ่าน Environment Variables
+- `WS_HOST`/`WS_PORT`: ตั้งค่าโฮสต์และพอร์ตของ WebSocket
+- `SMARTCARD_DEBUG=1`: เปิดโหมดดีบั๊ก
+- `READ_PHOTO=0/1`: ปิด/เปิดการอ่านรูปจากบัตร
+- `PHOTO_METHOD=parts`: เลือกวิธีอ่านรูปแบบชุดคำสั่งคงที่
+- `ENABLE_PHOTO_SCAN=1`: เปิดการสแกนหา offset รูปอัตโนมัติ
+
+## ข้อจำกัด
+- รูปภาพอาจอ่านไม่ได้ในบางรุ่นบัตรหรือเครื่องอ่าน
+- ต้องติดตั้งและเปิดบริการ Smart Card ของ Windows ให้พร้อมใช้งาน
+
+## ใบอนุญาต
+Apache License 2.0
+
 # Thai Smart Card WebSocket Reader (Tray App)
 
 แอป Windows แบบถาดระบบ (System Tray) ที่อ่านข้อมูลบัตรประชาชนไทยผ่าน PC/SC และให้บริการผ่าน WebSocket API เพื่อส่งข้อมูลบัตรไปยังแอปของคุณแบบเรียลไทม์ พร้อมรองรับการอ่านรูปถ่ายบนบัตร และควบคุมด้วยตัวแปรสภาพแวดล้อม
